@@ -59,53 +59,6 @@ class PointedValue<A> {
   String toString() => '$value @ $position';
 }
 
-abstract class Expectations {
-  const Expectations();
-
-  factory Expectations.empty(Position position) =>
-      new EmptyExpectation(position);
-  factory Expectations.single(String str, Position position) =>
-      new SingleExpectation(str, position);
-
-  CombinedExpectation best(Expectations other) => new CombinedExpectation(this, other);
-
-  Position get position;
-  Set<String> get expected;
-}
-
-class EmptyExpectation extends Expectations {
-  final Position _position;
-
-  const EmptyExpectation(this._position);
-
-  Position get position => _position;
-  Set<String> get expected => new Set<String>();
-}
-
-class SingleExpectation extends Expectations {
-  final String _expected;
-  final Position _position;
-
-  SingleExpectation(this._expected, this._position);
-
-  Position get position => _position;
-  Set<String> get expected => new Set<String>.from([_expected]);
-}
-
-class CombinedExpectation extends Expectations {
-  final Expectations first;
-  final Expectations second;
-
-  CombinedExpectation(this.first, this.second);
-
-  Position get position {
-    if (first.position < second.position) return second.position;
-    return first.position;
-  }
-
-  Set<String> get expected => first.expected..addAll(second.expected);
-}
-
 class ParseResult<A> {
   final bool isSuccess;
   final bool isCommitted;
@@ -113,52 +66,30 @@ class ParseResult<A> {
   final A value;
   final String text;
   final Position position;
-  final Expectations expectations;
 
-  ParseResult(this.text, this.expectations, this.position, this.isSuccess,
+  ParseResult(this.text, this.position, this.isSuccess,
               this.isCommitted, this.value);
 
   factory ParseResult.success(A value, String text, Position position,
-      [Expectations expectations, bool committed = false]) {
-    final Expectations exps = (expectations != null)
-        ? expectations : new Expectations.empty(position);
-    return new ParseResult(text, exps, position, true, committed, value);
+      [bool committed = false]) {
+    return new ParseResult(text, position, true, committed, value);
   }
 
   factory ParseResult.failure(String text, Position position,
-      [Expectations expectations, bool committed = false]) {
-    final Expectations exps = (expectations != null)
-        ? expectations : new Expectations.empty(position);
-    return new ParseResult(text, exps, position, false, committed, null);
+      [bool committed = false]) {
+    return new ParseResult(text, position, false, committed, null);
   }
 
 
-  ParseResult copy({String text, Expectations expectations, Position position,
+  ParseResult copy({String text, Position position,
                     bool isSuccess, bool isCommitted,
                     Object value: const Undefined()}) {
     return new ParseResult(
         (text != null)               ? text         : this.text,
-        (expectations != null)       ? expectations : this.expectations,
         (position != null)           ? position     : this.position,
         (isSuccess != null)          ? isSuccess    : this.isSuccess,
         (isCommitted != null)        ? isCommitted  : this.isCommitted,
         (value != const Undefined()) ? value        : this.value);
-  }
-
-  String get errorMessage {
-    final pos = expectations.position;
-    final maxSeenChar = (pos.offset < text.length)
-    ? "'${text[pos.offset]}'"
-    : 'eof';
-    final prelude =
-    'line ${pos.line}, character ${pos.character}:';
-    final expected = expectations.expected;
-    if (expected.isEmpty) {
-      return '$prelude unexpected $maxSeenChar.';
-    } else {
-      final or = _humanOr(expected.toList());
-      return "$prelude expected $or, got $maxSeenChar.";
-    }
   }
 
   String get _rest => text.substring(position.offset);
@@ -169,21 +100,7 @@ class ParseResult<A> {
     final c = isCommitted ? '*' : '';
     return isSuccess
         ? 'success$c: {value: $value, rest: "$_shortRest"}'
-        : 'failure$c: {message: $errorMessage, rest: "$_shortRest"}';
-  }
-
-  static String _humanOr(List es) {
-    assert(es.length > 0);
-    if (es.length == 1) {
-      return es[0];
-    } else {
-      StringBuffer result = new StringBuffer();
-      for (int i = 0; i < es.length - 2; i++) {
-        result.write('${es[i]}, ');
-      }
-      result.write('${es[es.length - 2]} or ${es[es.length - 1]}');
-      return result.toString();
-    }
+        : 'failure$c: {position: $position, rest: "$_shortRest"}';
   }
 }
 
@@ -200,7 +117,7 @@ class Parser<A> {
   A parse(String s, {int tabStop: 1}) {
     ParseResult<A> result = run(s, new Position(0, 1, 1, tabStop: tabStop));
     if (result.isSuccess) return result.value;
-    else throw result.errorMessage;
+    else throw "Parse error";
   }
 
   /// Monadic bind.
@@ -210,7 +127,6 @@ class Parser<A> {
       if (res.isSuccess) {
         final res2 = g(res.value)._run(text, res.position);
         return res2.copy(
-            expectations: res.expectations.best(res2.expectations),
             isCommitted: res.isCommitted || res2.isCommitted);
       } else {
         return res;
@@ -219,10 +135,7 @@ class Parser<A> {
   }
 
   Parser expecting(String expected) {
-    return new Parser((s, pos) {
-      final res = _run(s, pos);
-      return res.copy(expectations: new Expectations.single(expected, pos));
-    });
+    return this;
   }
 
   Parser get committed {
@@ -264,8 +177,7 @@ class Parser<A> {
         return res;
       } else {
         ParseResult res2 = p._run(s, pos);
-        return res2.copy(
-            expectations: res.expectations.best(res2.expectations));
+        return res2;
       }
     });
   }
@@ -330,26 +242,22 @@ class Parser<A> {
     return new Parser((s, pos) {
       List res = [];
       Position index = pos;
-      var exps = new Expectations.empty(pos);
       bool committed = false;
       while(true) {
         final endRes = end._run(s, index);
-        exps = exps.best(endRes.expectations);
         if (endRes.isSuccess) {
-          return endRes.copy(value: res, expectations: exps,
-                             isCommitted: committed);
+          return endRes.copy(value: res, isCommitted: committed);
         } else if (!endRes.isCommitted) {
           final xRes = this._run(s, index);
-          exps = exps.best(xRes.expectations);
           committed = committed || xRes.isCommitted;
           if (xRes.isSuccess) {
             res.add(xRes.value);
             index = xRes.position;
           } else {
-            return xRes.copy(expectations: exps, isCommitted: committed);
+            return xRes.copy(isCommitted: committed);
           }
         } else {
-          return endRes.copy(expectations: exps, isCommitted: committed);
+          return endRes.copy(isCommitted: committed);
         }
       }
     });
@@ -365,26 +273,22 @@ class Parser<A> {
     // Imperative version to avoid stack overflows.
     return new Parser((s, pos) {
       Position index = pos;
-      var exps = new Expectations.empty(pos);
       var commit = false;
       while(true) {
         final endRes = end._run(s, index);
-        exps = exps.best(endRes.expectations);
         commit = commit || endRes.isCommitted;
         if (endRes.isSuccess) {
-          return endRes.copy(value: null, expectations: exps,
-                             isCommitted: commit);
+          return endRes.copy(value: null, isCommitted: commit);
         } else if (!endRes.isCommitted) {
           final xRes = this._run(s, index);
-          exps = exps.best(xRes.expectations);
           commit = commit || xRes.isCommitted;
           if (xRes.isSuccess) {
             index = xRes.position;
           } else {
-            return xRes.copy(expectations: exps, isCommitted: commit);
+            return xRes.copy(isCommitted: commit);
           }
         } else {
-          return endRes.copy(expectations: exps);
+          return endRes;
         }
       }
     });
@@ -401,20 +305,18 @@ class Parser<A> {
   Parser<List<A>> _many(List<A> acc()) {
     return new Parser((s, pos) {
       final res = acc();
-      var exps = new Expectations.empty(pos);
       Position index = pos;
       bool committed = false;
       while(true) {
         ParseResult<A> o = this._run(s, index);
-        exps = exps.best(o.expectations);
         committed = committed || o.isCommitted;
         if (o.isSuccess) {
           res.add(o.value);
           index = o.position;
         } else if (o.isCommitted) {
-          return o.copy(expectations: exps);
+          return o;
         } else {
-          return new ParseResult.success(res, s, index, exps, committed);
+          return new ParseResult.success(res, s, index, committed);
         }
       }
     });
@@ -433,18 +335,16 @@ class Parser<A> {
     // Imperative version to avoid stack overflows.
     return new Parser((s, pos) {
       Position index = pos;
-      var exps = new Expectations.empty(pos);
       bool committed = false;
       while(true) {
         ParseResult<A> o = this._run(s, index);
-        exps = exps.best(o.expectations);
         committed = committed || o.isCommitted;
         if (o.isSuccess) {
           index = o.position;
         } else if (o.isCommitted) {
-          return o.copy(expectations: exps);
+          return o;
         } else {
-          return new ParseResult.success(null, s, index, exps, committed);
+          return new ParseResult.success(null, s, index, committed);
         }
       }
     });
@@ -485,20 +385,18 @@ class Parser<A> {
     rest(acc) {
       return new Parser((s, pos) {
         Position index = pos;
-        var exps = new Expectations.empty(pos);
         var commit = false;
         while(true) {
           combine(f) => (x) => f(acc, x);
           final res = (success(combine) * sep * this)._run(s, index);
-          exps = exps.best(res.expectations);
           commit = commit || res.isCommitted;
           if (res.isSuccess) {
             acc = res.value;
             index = res.position;
           } else if (res.isCommitted) {
-            return res.copy(expectations: exps);
+            return res;
           } else {
-            return new ParseResult.success(acc, s, index, exps, commit);
+            return new ParseResult.success(acc, s, index, commit);
           }
         }
       });
@@ -553,7 +451,7 @@ Parser success(value) =>
 final Parser eof = new Parser((s, pos) =>
     pos.offset >= s.length
         ? new ParseResult.success(null, s, pos)
-        : new ParseResult.failure(s, pos, new Expectations.single("eof", pos)));
+        : new ParseResult.failure(s, pos));
 
 Parser pred(bool p(String char)) {
   return new Parser((s, pos) {
@@ -592,7 +490,7 @@ Parser string(String str) {
     if (match) {
       return new ParseResult.success(str, s, pos.copy(offset: max, line: newline, character: newchar));
     } else {
-      return new ParseResult.failure(s, pos, new Expectations.single("'$str'", pos));
+      return new ParseResult.failure(s, pos);
     }
   });
 }
@@ -607,17 +505,13 @@ final Parser<Position> position =
 Parser choice(List<Parser> ps) {
   // Imperative version for efficiency
   return new Parser((s, pos) {
-    var exps = new Expectations.empty(pos);
     for (final p in ps) {
       final res = p._run(s, pos);
-      exps = exps.best(res.expectations);
-      if (res.isSuccess) {
-        return res.copy(expectations: exps);
-      } else if (res.isCommitted) {
+      if (res.isSuccess || res.isCommitted) {
         return res;
       }
     }
-    return new ParseResult.failure(s, pos, exps);
+    return new ParseResult.failure(s, pos);
   });
 }
 
